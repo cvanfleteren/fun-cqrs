@@ -2,19 +2,20 @@ package io.funcqrs.akka.backend
 
 import _root_.akka.actor.ActorRef
 import _root_.akka.actor.Actor
-import _root_.akka.pattern.{ ask => akkaAsk }
+import _root_.akka.pattern.{ask => akkaAsk}
 import _root_.akka.util.Timeout
 import io.funcqrs._
-import io.funcqrs.akka.AggregateManager.{ Exists, GetState, UntypedIdAndCommand }
+import io.funcqrs.akka.AggregateManager.{Exists, GetState, UntypedIdAndCommand}
 import io.funcqrs.akka.EventsMonitorActor.Subscribe
-import io.funcqrs.akka.{ EventsMonitorActor, ProjectionMonitorActor }
+import io.funcqrs.akka.{EventsMonitorActor, ProjectionMonitorActor}
 import io.funcqrs.behavior.AggregateAliases
 
 import scala.concurrent.Future
-import scala.concurrent.duration.{ FiniteDuration, _ }
+import scala.concurrent.duration.{FiniteDuration, _}
 import scala.util.Try
 import scala.util.control.NonFatal
 import scala.collection.immutable
+import scala.concurrent.java8.FuturesConvertersImpl.P
 
 case class AggregateActorRef[A, C, E, I <: AggregateId](
     id: I,
@@ -80,7 +81,8 @@ class ViewBoundedAggregateActorRef[A, C, E, I <: AggregateId](
     aggregateRef: AggregateActorRef[A, C, E, I],
     defaultView: String,
     projectionMonitorActorRef: ActorRef,
-    eventsFilter: EventsFilter = All
+    eventsFilter: EventsFilter = All,
+    eventExtractor: EventExtractor = IdentityExtractor
 ) extends AggregateAliases {
 
   type Aggregate           = A
@@ -97,7 +99,11 @@ class ViewBoundedAggregateActorRef[A, C, E, I <: AggregateId](
   def exists()(implicit timeout: Timeout, sender: ActorRef): Future[Boolean] = isInitialized
 
   def withFilter(eventsFilter: EventsFilter): ViewBoundedAggregateActorRef[A, C, E, I] =
-    new ViewBoundedAggregateActorRef(underlyingRef, defaultView, projectionMonitorActorRef, eventsFilter)
+    new ViewBoundedAggregateActorRef(underlyingRef, defaultView, projectionMonitorActorRef, eventsFilter, eventExtractor)
+
+  def withExtractor(eventExtractor: EventExtractor): ViewBoundedAggregateActorRef[A,C,E,I] = {
+    new ViewBoundedAggregateActorRef(underlyingRef,defaultView,projectionMonitorActorRef,eventsFilter, eventExtractor)
+  }
 
   def limit(count: Int): ViewBoundedAggregateActorRef[A, C, E, I] = withFilter(Limit(count))
 
@@ -127,7 +133,7 @@ class ViewBoundedAggregateActorRef[A, C, E, I <: AggregateId](
 
     import scala.concurrent.ExecutionContext.Implicits.global
     def newEventsMonitor() = {
-      (askableProjectionMonitorActorRef ? ProjectionMonitorActor.EventsMonitorRequest(cmd.id, defaultView)).mapTo[ActorRef]
+      (askableProjectionMonitorActorRef ? ProjectionMonitorActor.EventsMonitorRequest(cmd.id, defaultView, eventExtractor)).mapTo[ActorRef]
     }
 
     val resultOnWrite =
@@ -168,6 +174,15 @@ class ProjectionJoinException(val evts: Seq[Any], val viewName: String, val caus
 
 trait EventsFilter {
   def filter[E](events: immutable.Seq[E]): immutable.Seq[E]
+}
+
+trait EventExtractor {
+
+  def extract[E,P](projectionPayload:P) : Option[E]
+}
+
+case object IdentityExtractor extends EventExtractor {
+  override def extract[E,P](projectionPayload: P) = Some(projectionPayload.asInstanceOf[E])
 }
 
 case object All extends EventsFilter {

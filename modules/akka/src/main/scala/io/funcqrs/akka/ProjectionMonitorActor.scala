@@ -3,21 +3,22 @@ package io.funcqrs.akka
 import java.util.UUID
 
 import akka.actor._
-import akka.event.{ ActorEventBus, LookupClassification }
-import akka.pattern.{ Backoff, BackoffSupervisor }
+import akka.event.{ActorEventBus, LookupClassification}
+import akka.pattern.{Backoff, BackoffSupervisor}
 import io.funcqrs.CommandId
 import io.funcqrs.akka.EventsMonitorActor.RemoveMe
 import io.funcqrs.akka.ProjectionMonitorActor.CreateProjection
 import io.funcqrs.akka.ProjectionMonitorActor.EventsMonitorRequest
 import io.funcqrs.EventWithCommandId
+import io.funcqrs.akka.backend.EventExtractor
 
-import scala.concurrent.duration.{ FiniteDuration, _ }
+import scala.concurrent.duration.{FiniteDuration, _}
 
 object ProjectionMonitorActor {
 
   case class CreateProjection(props: Props, name: String)
 
-  case class EventsMonitorRequest(commandId: CommandId, projectionName: String)
+  case class EventsMonitorRequest(commandId: CommandId, projectionName: String, eventExtractor: EventExtractor)
 
 }
 
@@ -59,7 +60,7 @@ class ProjectionMonitorActor extends Actor with ActorLogging {
     case evt: EventWithCommandId => receivedEventFromProjection(evt)
 
     // create EventsMonitorActors on demand
-    case EventsMonitorRequest(commandId, projectionName) => createEventMonitor(commandId, projectionName)
+    case EventsMonitorRequest(commandId, projectionName, eventExtractor) => createEventMonitor(commandId, projectionName, eventExtractor)
 
     // child EventsMonitor is ready, can be removed
     case RemoveMe(eventsMonitor) => removeEventMonitor(eventsMonitor)
@@ -96,13 +97,13 @@ class ProjectionMonitorActor extends Actor with ActorLogging {
     eventBus.publish((evt, projectionName))
   }
 
-  private def createEventMonitor(commandId: CommandId, projectionName: String): Unit = {
+  private def createEventMonitor(commandId: CommandId, projectionName: String, eventExtractor: EventExtractor): Unit = {
 
     val monitorName = s"monitor::$projectionName::${commandId.value}::${UUID.randomUUID()}"
 
     // TODO this could be moved to property file eventually
     val shutdownEventsMonitorAfter = 10.seconds
-    val monitor                    = context.actorOf(eventsMonitor(commandId, projectionName, shutdownEventsMonitorAfter), monitorName)
+    val monitor                    = context.actorOf(eventsMonitor(commandId, projectionName, shutdownEventsMonitorAfter, eventExtractor), monitorName)
 
     // subscribe for events having `commandId` and coming from projection named with `projectionName`
     eventBus.subscribe(monitor, (commandId, projectionName))
@@ -118,7 +119,7 @@ class ProjectionMonitorActor extends Actor with ActorLogging {
     context.stop(eventsMonitor)
   }
 
-  class EventsMonitorActor(commandId: CommandId, projectionName: String, timeout: FiniteDuration) extends Actor with ActorLogging {
+  class EventsMonitorActor(commandId: CommandId, projectionName: String, timeout: FiniteDuration, eventExtractor: EventExtractor) extends Actor with ActorLogging {
 
     import EventsMonitorActor._
 
@@ -145,6 +146,12 @@ class ProjectionMonitorActor extends Actor with ActorLogging {
         eventsReceived = eventsReceived :+ evt
         tryComplete()
 
+      case evt if eventExtractor.extract(evt).isDefined =>
+        val actualEvent = eventExtractor.extract(evt).get
+        log.debug("extracted event {}", actualEvent)
+        eventsReceived = eventsReceived :+ actualEvent
+        tryComplete()
+
       case anyOther => log.debug("not expecting this one!! {}", anyOther)
     }
 
@@ -164,8 +171,8 @@ class ProjectionMonitorActor extends Actor with ActorLogging {
 
   }
 
-  def eventsMonitor(commandId: CommandId, projectionName: String, timeout: FiniteDuration) =
-    Props(new EventsMonitorActor(commandId, projectionName, timeout))
+  def eventsMonitor(commandId: CommandId, projectionName: String, timeout: FiniteDuration, eventExtractor: EventExtractor) =
+    Props(new EventsMonitorActor(commandId, projectionName, timeout,eventExtractor))
 }
 
 object EventsMonitorActor {
